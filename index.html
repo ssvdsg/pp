@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>合同号与数量匹配工具</title>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<style>
+  body { font-family: "Microsoft YaHei", margin: 20px; }
+  textarea { width: 48%; height: 150px; margin: 10px 1%; }
+  table { border-collapse: collapse; margin-top: 20px; width: 100%; }
+  th, td { border: 1px solid #333; padding: 4px; text-align: center; cursor: default; }
+  th { background: #f0f0f0; cursor: pointer; }
+  td.copyable { cursor: pointer; color: #007bff; }
+  button { padding: 6px 12px; margin: 10px 5px 10px 0; }
+  .stats span { margin-left: 15px; font-weight: bold; }
+  .highlight { color: white; background-color: #007bff; padding: 2px 6px; border-radius: 3px; }
+  .unmatched { background-color: #ffeb3b; } /* 表一未匹配高亮 */
+  .unmatched2 { background-color: #ffe0b2; } /* 表二未匹配高亮 */
+  .matched-highlight { background-color: #90caf9 !important; } /* 点击表二高亮表一匹配行 */
+  h3 { margin-top: 30px; }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <h2>合同号与数量匹配工具</h2>
+ <div style="display: flex; gap: 10px;">
+  <textarea v-model="table1Text" placeholder="粘贴第一个表格（主表）" style="flex: 1; height: 150px;"></textarea>
+  <textarea v-model="table2Text" placeholder="粘贴第二个表格（合同表）" style="flex: 1; height: 150px;"></textarea>
+</div>
+  <div class="stats">
+    <button @click="updateMatch">手动匹配</button>
+    <button @click="copyResult">复制结果</button>
+    <span class="highlight">表1件数合计: {{ sumTable1Qty }}</span>
+    <span class="highlight">表2总件数: {{ sumTable2Qty }}</span>
+    <span class="highlight">已匹配数量合计: {{ sumMatchedQty }} </span>
+    <span class="highlight">表2总重量: {{ sumTable2Weight }}</span>
+    <span class="highlight">已匹配总重: {{ sumMatchedQty }} 		  *200 KG  =  {{ sumMatchedQty * 200 }} KG</span>
+  </div>
+
+  <!-- 表1结果 -->
+<div v-if="result.length">
+  <h3>表1匹配结果</h3>
+  <div ref="table1Container" style="overflow:auto;">
+    <table style="table-layout: auto; width: max-content;">
+      <thead>
+        <tr>
+          <th v-for="(h, index) in result[0]" :key="index" @click="copyColumn(index)"
+              style="white-space: nowrap; max-width: 150px; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left;">
+            {{ h }}
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="(row, rowIndex) in result.slice(1)" :key="rowIndex"
+            :class="{'unmatched': row[row.length-1] === '未匹配', 'matched-highlight': highlightedRows.includes(rowIndex)}">
+          <td v-for="(cell, colIndex) in row" 
+              :key="colIndex"
+              class="copyable"
+              @click="copyCell(cell)"
+              style="white-space: nowrap; max-width: 150px; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left;">
+            {{ cell }}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+
+  <!-- 表2详细信息 -->
+  <div v-if="table2Data.length">
+    <h3>表2详细信息</h3>
+    <table>
+      <thead>
+        <tr>
+          <th v-for="(h, index) in table2Data[0]" :key="index">{{ h }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="(row, rowIndex) in table2Data.slice(1)" :key="rowIndex"
+            :class="{'unmatched2': row._unmatched}"
+            @click="highlightTable1(row, rowIndex)">
+          <td v-for="(cell, colIndex) in row" :key="colIndex" v-html="formatCell(row, colIndex)"></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+ 
+  <!-- 合同号匹配统计 -->
+  <div v-if="contractStats.length">
+    <h3>合同号匹配统计</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>合同号</th>
+          <th>原始件数</th>
+          <th>已匹配件数</th>
+          <th>剩余件数</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="item in contractStats" :key="item.contract">
+          <td>{{ item.contract }}</td>
+          <td>{{ item.originalQty }}</td>
+          <td>{{ item.matchedQty }}</td>
+          <td>{{ item.remainingQty }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const { createApp, ref, computed, watch, nextTick } = Vue;
+
+createApp({
+  setup() {
+    const table1Text = ref('');
+    const table2Text = ref('');
+    const result = ref([]);
+    const table2Data = ref([]);
+    const contractStats = ref([]);
+
+    const highlightedRows = ref([]);
+    const table1Container = ref(null);
+    const levelMap = {};
+
+    function parseExcelText(text){
+      return text.trim().split(/\r?\n/).map(line=>line.split(/\t/).map(cell=>cell.trim()));
+    }
+
+    function normalize(str){ return str ? str.trim().toUpperCase() : ''; }
+
+    function parseLevelQty(levelStr){
+      if(!levelStr) return [];
+      return levelStr.split(',').map(p=>{
+        const m=p.trim().match(/^(\S+)\s+(\d+(?:\.\d+)?)$/);
+        return m? {level:normalize(m[1]), qty:parseFloat(m[2])} : null;
+      }).filter(Boolean);
+    }
+
+    function findColumnIndex(header, name){ return header.indexOf(name); }
+
+    const sumTable1Qty = computed(() => {
+  if (!result.value.length) return 0;
+  const qtyIndex = findColumnIndex(result.value[0], '件数');
+   
+  return result.value.slice(1).reduce((s, row) => {
+    // 获取"件数"列的值，并移除其中的逗号再转化为浮动数字
+    const qty=parseFloat(row[qtyIndex]);
+    return s + qty;
+  }, 0);
+});
+
+
+    const sumTable2Qty = computed(()=>{
+      if(!table2Data.value.length) return 0;
+      const idx = findColumnIndex(table2Data.value[0],'物料信息');
+      return table2Data.value.slice(1).reduce((s,row)=>{
+        parseLevelQty(row[idx]).forEach(l=>s+=l.qty);
+        return s;
+      },0);
+    });
+
+    const sumTable2Weight = computed(()=>{
+      if(!table2Data.value.length) return 0;
+      const idx = findColumnIndex(table2Data.value[0],'重量');
+      return table2Data.value.slice(1).reduce((s,row)=>s+(parseFloat(row[idx]||0)),0);
+    });
+
+    const sumMatchedQty = computed(()=>{
+      if(!result.value.length) return 0;
+      const qtyIndex = findColumnIndex(result.value[0],'件数');
+      const statusIndex = findColumnIndex(result.value[0],'件数(匹配状态)');
+      return result.value.slice(1).reduce((s,row)=>s+((row[statusIndex]==='完全匹配')?parseFloat(row[qtyIndex]||0):0),0);
+    });
+    function parseExcelTexttwo(text, headers) {
+  return text.trim().split(/\r?\n/).map(line => {
+    return line.split(/\t/).map((cell, colIndex) => {
+      // 定义需要处理的列索引名称
+      const targetColumns = ['数量', '运输数量', '件数', '担数'];
+      
+      // 如果当前列的表头包含目标列之一，进行格式化
+      if (targetColumns.includes(headers[colIndex])) {
+        // 去除千位分隔符，并转为数字类型
+        let cleanedCell = cell.replace(/,/g, '');
+        return isNaN(cleanedCell) ? cell : parseFloat(cleanedCell);
+      }
+      
+      // 其他列直接返回原值
+      return cell.trim();
+    });
+  });
+}
+
+function updateMatch(){
+  // 清空高亮行
+  highlightedRows.value = [];
+
+  // 解析 Excel 数据
+  const data0 = parseExcelText(table1Text.value);
+  const data1 = parseExcelTexttwo(table1Text.value,data0[0]);
+  // console.log(data3)
+  const data2Raw = parseExcelText(table2Text.value);
+ 
+  // 复制数据2的内容，保留表头
+  table2Data.value = data2Raw.map((row, i) => i === 0 ? row : row.slice());
+
+  // 如果数据为空则返回
+  if (!data1.length || !data2Raw.length) return;
+
+  // 查找数据1中的“等级”和“件数”列索引
+  const levelIdx1 = findColumnIndex(data1[0], '等级');
+  const qtyIdx1 = findColumnIndex(data1[0], '件数');
+  
+  // 如果没有找到相应列，则返回
+  if (levelIdx1 === -1 || qtyIdx1 === -1) return;
+  
+  // 查找数据2中的相关列
+  const header2 = data2Raw[0];
+  const materialIdx = findColumnIndex(header2, '物料信息');
+  const contractIdx = findColumnIndex(header2, '合同编号');
+  const weightIdx = findColumnIndex(header2, '重量');
+
+  // 清空等级映射
+  for (const k in levelMap) delete levelMap[k];
+
+  // 初始化统计数据
+  const statsMap = {};
+  const levelStatMap = {};
+
+  // 遍历数据2，处理每一行
+  for (let i = 1; i < data2Raw.length; i++) {
+    // 解析物料信息中的等级和数量
+    const levels = parseLevelQty(data2Raw[i][materialIdx]);
+    const contract = data2Raw[i][contractIdx];
+    const weight = parseFloat(data2Raw[i][weightIdx] || 0);
+
+    // 标记该行未匹配
+    data2Raw[i]._unmatched = false;
+
+    // 遍历每个等级，更新映射和统计数据
+    levels.forEach(l => {
+      const key = `${l.level}_${l.qty}`;
+      
+      // 如果没有该级别的映射，创建一个空数组
+      if (!levelMap[key]) levelMap[key] = [];
+      
+      // 将当前合同信息添加到映射中
+      levelMap[key].push({ contract, i });
+
+      // 初始化合同统计数据
+      if (!statsMap[contract]) statsMap[contract] = { contract, originalQty: 0, matchedQty: 0 };
+
+      // 更新原始数量
+      statsMap[contract].originalQty += l.qty;
+
+      // 初始化等级统计数据
+      if (!levelStatMap[l.level]) levelStatMap[l.level] = { level: l.level, totalQty: 0, totalWeight: 0 };
+
+      // 更新该等级的总数量和总重量
+      levelStatMap[l.level].totalQty += l.qty;
+      levelStatMap[l.level].totalWeight += weight * (l.qty / levels.reduce((s, it) => s + it.qty, 0));
+    });
+  }
+
+  // 新表头，添加匹配的合同编号和件数状态列
+  const header = data1[0].concat("合同编号(匹配)", "件数(匹配状态)");
+
+  // 新的结果数据
+  const newData = [header];
+  
+  // 遍历数据1的每一行，进行匹配
+  for (let i = 1; i < data1.length; i++) {
+    const row = data1[i];
+    const level = normalize(row[levelIdx1]);
+    const qty=parseFloat(row[qtyIdx1]);
+    console.log(qty)
+    const key = `${level}_${qty}`;
+
+    // 默认“未匹配”
+    let contract = "未匹配", status = "未匹配";
+
+    // 如果找到匹配的级别和数量，则更新合同编号和状态
+    if (levelMap[key] && levelMap[key].length > 0) {
+      const info = levelMap[key].shift();
+      contract = info.contract;
+      status = "完全匹配";
+
+      // 更新合同的已匹配数量
+      statsMap[contract].matchedQty += qty;
+    }
+
+    // 将匹配结果添加到新数据中
+    newData.push(row.concat(contract, status));
+  }
+
+  // 遍历数据2，标记未匹配的行
+  table2Data.value.slice(1).forEach((row, i) => {
+    const levels = parseLevelQty(row[materialIdx]);
+
+    // 判断是否有任何物料信息未匹配
+    const unmatched = levels.some(l => {
+      const key = `${l.level}_${l.qty}`;
+      return !levelMap[key] || levelMap[key].every(v => v.i !== i);
+    });
+
+    // 设置该行的未匹配标志
+    row._unmatched = unmatched;
+  });
+
+  // 将结果赋值给全局变量
+  result.value = newData;
+
+  // 更新合同统计数据，包括剩余数量
+  contractStats.value = Object.values(statsMap).map(s => ({ ...s, remainingQty: s.originalQty - s.matchedQty }));
+
+
+}
+
+
+function highlightTable1(row,rowIndex){
+  highlightedRows.value=[];
+  if(!row._unmatched) return;
+  const header2=table2Data.value[0];
+  const materialIdx=findColumnIndex(header2,'物料信息');
+  const levels=parseLevelQty(row[materialIdx]);
+  const levelIdx1=findColumnIndex(result.value[0],'等级');
+  const qtyIdx1=findColumnIndex(result.value[0],'件数');
+  result.value.slice(1).forEach((r,i)=>{
+    levels.forEach(l=>{
+      if(normalize(r[levelIdx1])===l.level && parseFloat(r[qtyIdx1])===l.qty){
+        highlightedRows.value.push(i);
+      }
+    });
+  });
+  nextTick(()=>{
+    // 自动滚动到表一高亮行
+    if(highlightedRows.value.length && table1Container.value){
+      const tr = table1Container.value.querySelectorAll('tbody tr')[highlightedRows.value[0]];
+      if(tr) tr.scrollIntoView({behavior:'smooth',block:'center'});
+    }
+  }); // <-- 补上闭合括号
+}
+
+
+    function formatCell(row, colIndex){
+      const header = table2Data.value[0];
+      const materialIdx = findColumnIndex(header,'物料信息');
+      const contractIdx = findColumnIndex(header,'合同编号');
+
+      if(colIndex === materialIdx){
+        const levels = parseLevelQty(row[materialIdx]);
+        const contractNo = row[contractIdx];
+        return levels.map(l=>{
+          const key = `${l.level}_${l.qty}`;
+          // 匹配则显示蓝色，未匹配红色
+          let matched = levelMap[key]?.some(v=>v.contract===contractNo);
+          if(matched) return `<span style="color:red">${l.level} ${l.qty}</span>`;
+          else return `<span style="color:blue">${l.level} ${l.qty}</span>`;
+        }).join(', ');
+      }
+      return row[colIndex];
+    }
+
+    // 通用复制函数
+    function copyText(text, msg="已复制到剪贴板！"){
+      const textarea=document.createElement('textarea');
+      textarea.value=text;
+      textarea.style.position='fixed';
+      textarea.style.top=0; textarea.style.left=0;
+      textarea.style.width='1px'; textarea.style.height='1px';
+      textarea.style.opacity=0;
+      document.body.appendChild(textarea);
+      textarea.focus(); textarea.select();
+      try{
+        const successful=document.execCommand('copy');
+        if(successful) alert(msg);
+        else alert('复制失败，请手动复制！');
+      } catch(err){
+        alert('复制失败，请手动复制！');
+      }
+      document.body.removeChild(textarea);
+    }
+
+    // 复制整表
+    function copyResult(){
+      if(!result.value.length) return;
+      const text=result.value.map(row=>row.join("\t")).join("\n");
+      copyText(text, "已复制结果到剪贴板！");
+    }
+
+    // 复制单元格
+    function copyCell(cell){ copyText(cell, "已复制: "+cell); }
+
+    // 复制整列
+    function copyColumn(colIndex){
+      if(!result.value.length) return;
+      const text=result.value.map(row=>row[colIndex]).join("\n");
+      copyText(text, "已复制整列到剪贴板！");
+    }
+
+    watch([table1Text, table2Text], updateMatch);
+
+    return { table1Text, table2Text, result, table2Data, updateMatch, copyResult, copyCell, copyColumn,
+             sumTable1Qty, sumMatchedQty, sumTable2Qty, sumTable2Weight,
+             contractStats,  highlightedRows, highlightTable1, formatCell, table1Container };
+  }
+}).mount('#app');
+</script>
