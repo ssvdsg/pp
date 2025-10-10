@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>合同号与数量匹配工具 - 修正版</title>
+<title>合同号与数量匹配工具 - 修正</title>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <style>
   body { font-family: "Microsoft YaHei", margin: 20px; }
@@ -17,6 +17,27 @@
   .unmatched { background-color: #e97255; } /* 表一未匹配高亮 */
   .unmatched2 { background-color: #ffe0b2; } /* 表二未匹配高亮 */
   .matched-highlight { background-color: #90caf9 !important; } /* 点击表二高亮表一匹配行 */
+.matched-red {
+  color: red;
+}
+/* 物料信息列自动换行 */
+.material-col {
+  white-space: normal;       /* 自动换行 */
+  word-break: break-word;    /* 长单词也会换行 */
+  text-align: left;          /* 左对齐更清晰 */
+}
+
+/* 其他列显示省略号 */
+.other-col {
+  max-width: 100px;          /* 可以根据需求调整 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.unmatched-blue {
+  color: blue;
+}
+
   h3 { margin-top: 30px; }
 </style>
 </head>
@@ -68,24 +89,28 @@
 </div>
 
 
-  <!-- 表2详细信息 -->
-  <div v-if="table2Data.length">
-    <h3>表2详细信息</h3>
-    <table>
-      <thead>
-        <tr>
-          <th v-for="(h, index) in table2Data[0]" :key="index">{{ h }}</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="(row, rowIndex) in table2Data.slice(1)" :key="rowIndex"
-            :class="{'unmatched2': row._unmatched}"
-            @click="highlightTable1(row, rowIndex)">
-          <td v-for="(cell, colIndex) in row" :key="colIndex" v-html="formatCell(row, colIndex, rowIndex)"></td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+<!-- 表2详细信息 -->
+<div v-if="table2Data.length">
+  <h3>表2详细信息</h3>
+  <table>
+    <thead>
+      <tr>
+        <th v-for="(h, index) in table2Data[0]" :key="index">{{ h }}</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr v-for="(row, rowIndex) in table2Data.slice(1)" :key="rowIndex"
+          :class="{'unmatched2': row._unmatched}"
+          @click="highlightTable1(row, rowIndex)">
+        <td v-for="(cell, colIndex) in row" 
+            :key="colIndex" 
+            v-html="formatCell(row, colIndex, rowIndex)"
+            :class="colIndex === findColumnIndex(table2Data[0],'物料信息') ? 'material-col' : 'other-col'">
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</div>
 
   <!-- 表二等级统计 -->
   <div v-if="levelStats.length">
@@ -253,6 +278,7 @@ createApp({
     if(candidates.length===1){
       const e = candidates[0];
       e.used = true;
+      e.matchedToRow1 = i;
       row.push(e.contract, "完全匹配");
     } else {
       row.push("未匹配", "未匹配"); // 第二轮处理
@@ -292,6 +318,7 @@ unmatchedRows.forEach(i=>{
   if(idx!==-1){
     const e = entries[idx];
     e.used = true; // 标记已匹配，不再参与任何匹配
+    e.matchedToRow1 = i;
     row[row.length-2] = e.contract;
     row[row.length-1] = "完全匹配";
   }
@@ -309,53 +336,68 @@ unmatchedRows.forEach(i=>{
 }
 
 
-    function highlightTable1(row, rowIndex){
-      highlightedRows.value = [];
-      // rowIndex here is 0-based relative to table2Data.slice(1), so map back:
-      const realRowIndex = rowIndex + 1;
-      const header2 = table2Data.value[0];
-      const materialIdx = findColumnIndex(header2,'物料信息');
-      const levels = parseLevelQty(row[materialIdx]);
-      const levelIdx1 = findColumnIndex(result.value[0],'等级');
-      const qtyIdx1 = findColumnIndex(result.value[0],'件数');
+function highlightTable1(row, rowIndex){
+  highlightedRows.value = [];
+  const realRowIndex = rowIndex + 1;
+  const header2 = table2Data.value[0];
+  const materialIdx = findColumnIndex(header2,'物料信息');
+  const levels = parseLevelQty(row[materialIdx]);
+  const levelIdx1 = findColumnIndex(result.value[0],'等级');
+  const qtyIdx1 = findColumnIndex(result.value[0],'件数');
 
-      result.value.slice(1).forEach((r,i)=>{
-        levels.forEach(l=>{
-          if(normalize(r[levelIdx1]) === l.level && (parseFloat(String(r[qtyIdx1]||'0').replace(/,/g,''))||0) === l.qty){
-            highlightedRows.value.push(i);
-          }
-        });
-      });
+  // 清空表一高亮
+  highlightedRows.value = [];
 
-      nextTick(()=>{
-        if(highlightedRows.value.length && table1Container.value){
-          const tr = table1Container.value.querySelectorAll('tbody tr')[highlightedRows.value[0]];
-          if(tr) tr.scrollIntoView({behavior:'smooth',block:'center'});
-        }
-      });
-    }
-
-    function formatCell(row, colIndex, rowIndex){
-      // rowIndex is 0-based for slice(1), so real index = rowIndex + 1
-      const header = table2Data.value[0];
-      const materialIdx = findColumnIndex(header,'物料信息');
-      const contractIdx = findColumnIndex(header,'合同编号');
-
-      if(colIndex === materialIdx){
-        const realRowIndex = rowIndex + 1;
-        const ids = entriesByRow[realRowIndex] || [];
-        // 按 entries 的顺序渲染，matched -> blue, unmatched -> red
-        return ids.map(id=>{
-          const e = entries[id];
-          if(!e) return '';
-          if(e.used) return `<span title="已匹配到 ${e.contract}">${e.level} ${e.qty}</span>`;
-          else return `<span style="color:red" title="未匹配">${e.level} ${e.qty}</span>`;
-        }).join(', ');
+  result.value.slice(1).forEach((r,i)=>{
+    levels.forEach(l=>{
+      if(normalize(r[levelIdx1]) === l.level && (parseFloat(String(r[qtyIdx1]||'0').replace(/,/g,''))||0) === l.qty){
+        highlightedRows.value.push(i); // 表一行高亮索引
       }
+    });
+  });
 
-      // 其他列直接显示（如果是合同列也直接显示）
-      return row[colIndex];
+  // 更新表二 matchedToRow1 高亮
+  table2Data.value.slice(1).forEach((r,i)=>{
+    const ids = entriesByRow[i+1] || [];
+    r._highlight = ids.some(id=>{
+      const e = entries[id];
+      return e.matchedToRow1 !== undefined && highlightedRows.value.includes(e.matchedToRow1);
+    });
+  });
+
+  nextTick(()=>{
+    if(highlightedRows.value.length && table1Container.value){
+      const tr = table1Container.value.querySelectorAll('tbody tr')[highlightedRows.value[0]];
+      if(tr) tr.scrollIntoView({behavior:'smooth',block:'center'});
     }
+  });
+}
+
+
+function formatCell(row, colIndex, rowIndex){
+  const header = table2Data.value[0];
+  const materialIdx = findColumnIndex(header,'物料信息');
+
+  if(colIndex === materialIdx){
+    // 物料信息列：保留原来的高亮逻辑
+    const realRowIndex = rowIndex + 1;
+    const ids = entriesByRow[realRowIndex] || [];
+    const highlight = row._highlight;
+    return ids.map(id=>{
+      const e = entries[id];
+      if(!e) return '';
+      let cls = '';
+      if(highlight) cls = 'unmatched-blue';    // 匹配到 → 蓝色
+      else if(!e.used) cls = 'matched-red';    // 未匹配 → 红色
+      return `<span class="${cls}" title="${e.used ? '已匹配到 ' + e.contract : '未匹配'}">${e.level} ${e.qty}</span>`;
+    }).join(', ');
+  } else {
+    // 非物料信息列：最多显示后15个字符，前面加省略号
+    const str = row[colIndex] ? row[colIndex].toString() : '';
+    return str.length <= 15 ? str : '…' + str.slice(-15);
+  }
+}
+
 
     // 通用复制函数
     function copyText(text, msg="已复制到剪贴板！"){
@@ -393,17 +435,49 @@ unmatchedRows.forEach(i=>{
       const text=result.value.map(row=>row[colIndex]).join("\n");
       copyText(text, "已复制整列到剪贴板！");
     }
-
+        const hiddenColumns = [
+      "承运商","业务日期","运输路径","运输部门","所属集团/公司","运输费用类别","客户名称",
+      "物料分类","调出仓库","计划名称","单混打","创建人","创建时间","修改人","修改时间",
+      "审核人","审核日期","货主.名称","保管者.名称"
+    ].map(s => s.trim().toUpperCase());
     // 防抖 watch
-    let debounceTimer = null;
-    watch([table1Text, table2Text], ()=>{
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(updateMatch, 500);
-    });
+let debounceTimer = null;
+watch([table1Text, table2Text], () => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+        // --- 表1处理：去除隐藏列 ---
+        if (table1Text.value) {
+            const arr1 = table1Text.value.split(/\r?\n/).map(r => r.split("\t"));
+            if (arr1.length > 0) {
+                const header = arr1[0];
+                const hiddenIdx = header.map((h, i) => hiddenColumns.includes((h||'').trim()) ? i : -1).filter(i => i !== -1);
+                const newArr1 = arr1.map(row => row.filter((_, i) => !hiddenIdx.includes(i)));
+                table1Text.value = newArr1.map(r => r.join("\t")).join("\n");
+            }
+        }
+
+        // --- 表2处理：只保留特定列 ---
+        if (table2Text.value) {
+            const visibleColumns = ["合同申办号","发货单位","到货单位","物料信息","合同编号","件数","重量"];
+            const arr2 = table2Text.value.split(/\r?\n/).map(r => r.split("\t"));
+            if (arr2.length > 0) {
+                const header = arr2[0];
+                const keepIdx = header.map((h, i) => visibleColumns.includes((h||'').trim()) ? i : -1).filter(i => i !== -1);
+                const newArr2 = arr2.map(row => keepIdx.map(i => row[i] || ''));
+                table2Text.value = newArr2.map(r => r.join("\t")).join("\n");
+            }
+        }
+
+        // --- 更新匹配 ---
+        updateMatch();
+    }, 500);
+});
+
+
 
     return { table1Text, table2Text, result, table2Data, updateMatch, copyResult, copyCell, copyColumn,
              sumTable1Qty, sumMatchedQty, sumTable2Qty, sumTable2Weight,
-             contractStats, levelStats, highlightedRows, highlightTable1, formatCell, table1Container };
+             contractStats, levelStats, highlightedRows, highlightTable1, formatCell, table1Container ,findColumnIndex   };
   }
 }).mount('#app');
 </script>
